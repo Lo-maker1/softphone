@@ -1,7 +1,9 @@
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 from typing import List, Optional
 import logging
+from workers.worker import execute_device_task
+from core.manager import DeviceManager
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("API")
@@ -11,6 +13,8 @@ app = FastAPI(
     description="API de gestion et d'orchestration de téléphones virtuels Android",
     version="1.0.0"
 )
+
+device_manager = DeviceManager()
 
 # Modèles Pydantic pour la validation des requêtes
 class TaskRequest(BaseModel):
@@ -31,22 +35,54 @@ def read_root():
 @app.post("/tasks/dispatch", status_code=202)
 def dispatch_task(task: TaskRequest):
     """
-    Reçoit une instruction et le nombre de téléphones nécessaires,
-    puis distribue la tâche dans la queue Redis / Celery.
+    Reçoit une instruction, réserve N téléphones actifs et distribue
+    les tâches asynchrones dans la file Celery / Redis.
     """
     logger.info(f"Ordre reçu: {task.task_name} sur {task.phone_count} téléphones.")
     
-    # Génération d'un ID de batch pour suivre l'exécution
-    batch_id = f"batch_{task.task_name}_{task.phone_count}"
+    # 1. Récupération des téléphones virtuels actuellement en ligne
+    active_devices = device_manager.list_running_devices()
     
-    # TODO: Pousser les N sub-tasks dans Celery / Redis
+    if not active_devices:
+        raise HTTPException(
+            status_code=503, 
+            detail="Aucun téléphone virtuel actif n'est disponible sur le serveur."
+        )
+    
+    if len(active_devices) < task.phone_count:
+        logger.warning(
+            f"Demandé: {task.phone_count}, mais seulement {len(active_devices)} appareils disponibles."
+        )
+    
+    # Sélection des N premiers téléphones disponibles
+    selected_devices = active_devices[:task.phone_count]
+    
+    # 2. Construction de la charge utile (payload)
+    task_payload = task.payload.copy()
+    task_payload["target_app"] = task.target_app
+    
+    dispatched_tasks = []
+    
+    # 3. Envoi des sous-tâches asynchrones à la file Celery
+    for dev in selected_devices:
+        device_id = dev["device_id"]
+        celery_job = execute_device_task.delay(
+            device_id=device_id, 
+            task_name=task.task_name, 
+            payload=task_payload
+        )
+        dispatched_tasks.append({
+            "device_id": device_id,
+            "task_id": celery_job.id
+        })
     
     return {
         "status": "queued",
-        "batch_id": batch_id,
         "task_name": task.task_name,
-        "allocated_phones": task.phone_count,
-        "message": f"Tâche diffusée avec succès à {task.phone_count} instances."
+        "target_app": task.target_app,
+        "requested_phones": task.phone_count,
+        "allocated_phones": len(dispatched_tasks),
+        "tasks": dispatched_tasks
     }
 
 @app.get("/devices", response_model=List[DeviceStatusResponse])
@@ -54,8 +90,12 @@ def list_devices():
     """
     Retourne la liste et l'état courant de la flotte de téléphones virtuels.
     """
-    # Exemple de données simulées / à relier avec DeviceManager
+    devices = device_manager.list_running_devices()
     return [
-        {"device_id": "127.0.0.1:5555", "status": "idle", "assigned_task": None},
-        {"device_id": "127.0.0.1:5556", "status": "running", "assigned_task": "account_creation"}
+        {
+            "device_id": dev["device_id"], 
+            "status": dev["status"], 
+            "assigned_task": None
+        }
+        for dev in devices
     ]
