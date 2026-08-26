@@ -1,0 +1,28 @@
+version: '3.8'
+
+services:
+  # Base de données Redis pour la queue de tâches
+  redis:
+    image: redis:7-alpine
+    container_name: cloud_phone_redis
+    ports:
+      - "6379:6379"
+    restart: always
+
+  # Instance Android 1 (Reddroid)
+  android_phone_1:
+    image: reddoi/reddroid:11.0.0-latest
+    container_name: android_phone_1
+    privileged: true
+    ports:
+      - "5555:5555"
+    restart: always
+
+  # Instance Android 2 (Reddroid)
+  android_phone_2:
+    image: reddoi/reddroid:11.0.0-latest
+    container_name: android_phone_2
+    privileged: true
+    ports:
+      - "5556:5555"
+    restart: always
